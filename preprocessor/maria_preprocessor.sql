@@ -19,9 +19,19 @@ from sqlglot import exp
 
 
 def adapter_call(request):
-    tree = sqlglot.parse_one(request, read="mysql")
-    tree = tree.transform(_rewrite_to_util)
-    return tree.sql(dialect="exasol", identify=True)
+    # Be conservative: any failure in sqlglot (parse error, unsupported
+    # construct, transform bug) returns the original statement so Exasol
+    # gets a chance to execute it natively. Better a database-level error
+    # message than a "preprocessor crashed" surprise — and Exasol-only
+    # syntax (OPEN SCHEMA, MINUS, etc.) sails through unchanged.
+    try:
+        tree = sqlglot.parse_one(request, read="mysql")
+        if tree is None:
+            return request
+        tree = tree.transform(_rewrite_to_util)
+        return tree.sql(dialect="exasol", identify=True)
+    except Exception:
+        return request
 
 
 def _rewrite_to_util(node):
