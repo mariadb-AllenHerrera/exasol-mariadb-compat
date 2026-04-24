@@ -1,0 +1,4 @@
+SELECT UTIL.JSON_OBJECT(
+    'ts', TIMESTAMP '2026-04-24 16:20:00',
+    'd',  DATE      '2026-04-24'
+)

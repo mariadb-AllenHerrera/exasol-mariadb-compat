@@ -48,6 +48,25 @@ Re-run either command any time to pick up new/updated UDFs.
    current `git describe` version).
 3. Commit both the UDF source and the updated `dist/` file.
 
+## Testing
+
+Each UDF has a directory under `tests/` with optional `setup.sql` fixtures
+plus `<case>.sql` + `<case>.expected.json` pairs. Rows are compared
+stringified so `DECIMAL` / `int` / `float` collapse.
+
+```sh
+# Prereq: UTIL.* already installed (see Quick start)
+pip install pyexasol
+python tests/run_tests.py --host <host> --user sys --password <pw> [--no-ssl-verify]
+
+# Only one UDF:
+python tests/run_tests.py --udf json_object --no-ssl-verify
+```
+
+The runner creates an ephemeral `MARIADB_COMPAT_TEST` schema, runs each
+group's `setup.sql` inside it, executes every case, then `DROP SCHEMA ...
+CASCADE`s. No persistent state.
+
 ## Layout
 
 ```
@@ -56,11 +75,21 @@ exasol-mariadb-compat/
 ├── build.sh                    # aggregates udfs/**/*.sql → dist/mariadb-compat.sql
 ├── udfs/
 │   └── json/
-│       └── json_extract.sql    # one CREATE OR REPLACE per file
+│       ├── json_extract.sql    # one CREATE OR REPLACE per file
+│       └── json_object.sql
 ├── dist/
 │   └── mariadb-compat.sql      # built artifact, committed
 └── tests/
-    └── fixtures/
+    ├── run_tests.py
+    ├── json_extract/
+    │   ├── setup.sql
+    │   ├── single_path.sql
+    │   ├── single_path.expected.json
+    │   └── ...
+    └── json_object/
+        ├── scalars.sql
+        ├── scalars.expected.json
+        └── ...
 ```
 
 ## Versioning

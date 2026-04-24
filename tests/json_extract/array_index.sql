@@ -1,0 +1,1 @@
+SELECT UTIL.JSON_EXTRACT('{"arr": [10, 20, 30]}', '["$.arr[1]"]')
