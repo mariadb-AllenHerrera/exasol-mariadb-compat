@@ -28,12 +28,17 @@ def main() -> int:
     p.add_argument("--no-ssl-verify", action="store_true",
                    help="Skip Exasol TLS cert validation (for docker-db's self-signed cert)")
     p.add_argument("--udfs-dir", type=Path, default=Path(__file__).parent / "udfs",
-                   help="Root directory to scan for *.sql files (default: ./udfs)")
+                   help="Root directory to scan for UDF *.sql files (default: ./udfs)")
+    p.add_argument("--preprocessor-dir", type=Path,
+                   default=Path(__file__).parent / "preprocessor",
+                   help="Root directory to scan for preprocessor *.sql files (default: ./preprocessor)")
     args = p.parse_args()
 
     sql_files = sorted(args.udfs_dir.rglob("*.sql"))
+    if args.preprocessor_dir.exists():
+        sql_files.extend(sorted(args.preprocessor_dir.rglob("*.sql")))
     if not sql_files:
-        print(f"[warn] no .sql files found under {args.udfs_dir}", file=sys.stderr)
+        print(f"[warn] no .sql files found under {args.udfs_dir} or {args.preprocessor_dir}", file=sys.stderr)
         return 0
 
     connect_kwargs = dict(dsn=f"{args.host}:{args.port}", user=args.user,
@@ -54,9 +59,12 @@ def main() -> int:
         print(f"[setup] CREATE SCHEMA UTIL failed: {e}", file=sys.stderr)
         return 3
 
-    root = args.udfs_dir.resolve()
+    repo_root = Path(__file__).parent.resolve()
     for f in sql_files:
-        rel = f.resolve().relative_to(root)
+        try:
+            rel = f.resolve().relative_to(repo_root)
+        except ValueError:
+            rel = f
         stmt = f.read_text().strip().rstrip(";")
         try:
             c.execute(stmt)

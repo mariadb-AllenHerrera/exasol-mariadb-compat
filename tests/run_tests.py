@@ -70,6 +70,14 @@ def main() -> int:
 
     passed = failed = 0
     for udf_dir in udf_dirs:
+        # Always start each group with the preprocessor OFF so setup SQL is
+        # parsed as Exasol-native. Groups that exercise the preprocessor
+        # (e.g. maria_preprocessor/) turn it back on in their setup.sql.
+        try:
+            c.execute("ALTER SESSION SET sql_preprocessor_script=''")
+        except Exception:
+            pass
+
         setup = udf_dir / "setup.sql"
         if setup.exists():
             try:
@@ -105,6 +113,10 @@ def main() -> int:
                 print(f"       actual  : {rows}", file=sys.stderr)
                 failed += 1
 
+    try:
+        c.execute("ALTER SESSION SET sql_preprocessor_script=''")
+    except Exception:
+        pass
     try:
         c.execute(f"DROP SCHEMA {args.schema} CASCADE")
     except Exception:

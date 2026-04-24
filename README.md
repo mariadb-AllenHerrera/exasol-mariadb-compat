@@ -35,10 +35,30 @@ Re-run either command any time to pick up new/updated UDFs.
 
 ## What's shipped today
 
+### UDFs (`udfs/`)
+
 | UDF | MariaDB function | Notes |
 |---|---|---|
 | `UTIL.JSON_EXTRACT(doc, paths_json_array)` | `JSON_EXTRACT(doc, p1, ..., pN)` | Single path → JSON-typed value; multi-path → JSON array of matches with missing paths silently skipped; all-missing → NULL. Path grammar: `$`, `$.key`, `$[idx]`, dotted/indexed chains. Wildcards (`$**`, `$[*]`) not yet supported. |
 | `UTIL.JSON_OBJECT(k1, v1, ..., kN, vN)` | `JSON_OBJECT(k1, v1, ...)` | Variadic key/value pairs → JSON object. DECIMAL values render as integers or floats; DATE / TIMESTAMP render as ISO-8601 strings. Odd-arg or NULL-key calls raise. |
+
+### Preprocessor (`preprocessor/`)
+
+`UTIL.MARIA_PREPROCESSOR` is an Exasol preprocessor script that, when
+activated with `ALTER SESSION SET sql_preprocessor_script=UTIL.MARIA_PREPROCESSOR`,
+transparently rewrites MariaDB SQL into Exasol SQL before it reaches the
+engine. Under the hood it uses `sqlglot` (from whatever SLC is active) to
+parse MariaDB, walks the AST rewriting specific constructs into calls
+against the UDFs above (or into native Exasol functions where they match),
+then generates the final Exasol SQL.
+
+The rewrite table lives inside the preprocessor script. When adding a new
+UDF here, add a corresponding branch to `_rewrite_to_util` in
+`preprocessor/maria_preprocessor.sql` in the same PR. Currently covered:
+
+- `JSON_EXTRACT` / `->` → `UTIL.JSON_EXTRACT`
+- `->>` → `JSON_VALUE` (native Exasol)
+- `JSON_OBJECT` → `UTIL.JSON_OBJECT`
 
 ## Adding or updating UDFs (build from source)
 
@@ -77,19 +97,15 @@ exasol-mariadb-compat/
 │   └── json/
 │       ├── json_extract.sql    # one CREATE OR REPLACE per file
 │       └── json_object.sql
+├── preprocessor/
+│   └── maria_preprocessor.sql  # UTIL.MARIA_PREPROCESSOR: AST-level MariaDB → Exasol rewriter
 ├── dist/
 │   └── mariadb-compat.sql      # built artifact, committed
 └── tests/
     ├── run_tests.py
-    ├── json_extract/
-    │   ├── setup.sql
-    │   ├── single_path.sql
-    │   ├── single_path.expected.json
-    │   └── ...
-    └── json_object/
-        ├── scalars.sql
-        ├── scalars.expected.json
-        └── ...
+    ├── json_extract/           # UDF runtime tests (raw UTIL.* calls)
+    ├── json_object/
+    └── maria_preprocessor/     # end-to-end MariaDB SQL through the preprocessor
 ```
 
 ## Versioning
