@@ -38,6 +38,7 @@ Re-run either command any time to pick up new/updated UDFs.
 | UDF | MariaDB function | Notes |
 |---|---|---|
 | `UTIL.JSON_EXTRACT(doc, paths_json_array)` | `JSON_EXTRACT(doc, p1, ..., pN)` | Single path → JSON-typed value; multi-path → JSON array of matches with missing paths silently skipped; all-missing → NULL. Path grammar: `$`, `$.key`, `$[idx]`, dotted/indexed chains. Wildcards (`$**`, `$[*]`) not yet supported. |
+| `UTIL.JSON_OBJECT(k1, v1, ..., kN, vN)` | `JSON_OBJECT(k1, v1, ...)` | Variadic key/value pairs → JSON object. DECIMAL values render as integers or floats; DATE / TIMESTAMP render as ISO-8601 strings. Odd-arg or NULL-key calls raise. |
 
 ## Adding or updating UDFs (build from source)
 
