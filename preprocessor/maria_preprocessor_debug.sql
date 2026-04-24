@@ -1,20 +1,18 @@
-CREATE OR REPLACE PYTHON3 PREPROCESSOR SCRIPT UTIL.MARIA_PREPROCESSOR AS
+CREATE OR REPLACE PYTHON3 PREPROCESSOR SCRIPT UTIL.MARIA_PREPROCESSOR_DEBUG AS
 
-# Transparent MariaDB -> Exasol query rewriter (production / "safe" variant).
+# DEBUG variant of UTIL.MARIA_PREPROCESSOR — same rewrite rules, but errors
+# raise instead of falling back to the original statement. Use during
+# development to surface sqlglot ParseErrors and transform bugs as immediate
+# query failures with full tracebacks.
 #
-# sqlglot (inside the current SLC) parses the incoming MariaDB SQL into an
-# AST. We walk it and rewrite specific constructs into UTIL.* calls (or into
-# native Exasol functions) that preserve MariaDB semantics. Any failure in
-# parse/transform/generate returns the original statement unchanged so Exasol
-# gets a chance to execute it natively — better a database-level error than a
-# preprocessor-level crash, and Exasol-only syntax (OPEN SCHEMA, MINUS, etc.)
-# sails through.
-#
-# For loud-failure dev iteration, swap to UTIL.MARIA_PREPROCESSOR_DEBUG:
+# Toggle:
 #   ALTER SESSION SET sql_preprocessor_script=UTIL.MARIA_PREPROCESSOR_DEBUG;
 #
-# Rewrites below must stay byte-identical to the debug variant; only
-# adapter_call differs. Keep them in sync.
+# Switch back for production:
+#   ALTER SESSION SET sql_preprocessor_script=UTIL.MARIA_PREPROCESSOR;
+#
+# The rewrite logic below MUST stay byte-identical to the safe variant; only
+# adapter_call differs. If you change rules in one, change them in the other.
 
 import json
 import sqlglot
@@ -22,10 +20,7 @@ from sqlglot import exp
 
 
 def adapter_call(request):
-    try:
-        return _transpile(request)
-    except Exception:
-        return request
+    return _transpile(request)
 
 
 def _transpile(request):

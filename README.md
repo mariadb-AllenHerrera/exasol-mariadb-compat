@@ -53,12 +53,30 @@ against the UDFs above (or into native Exasol functions where they match),
 then generates the final Exasol SQL.
 
 The rewrite table lives inside the preprocessor script. When adding a new
-UDF here, add a corresponding branch to `_rewrite_to_util` in
-`preprocessor/maria_preprocessor.sql` in the same PR. Currently covered:
+UDF here, add a corresponding branch to `_rewrite_to_util` in **both**
+`maria_preprocessor.sql` and `maria_preprocessor_debug.sql` in the same PR.
+Currently covered:
 
 - `JSON_EXTRACT` / `->` → `UTIL.JSON_EXTRACT`
 - `->>` → `JSON_VALUE` (native Exasol)
 - `JSON_OBJECT` → `UTIL.JSON_OBJECT`
+
+#### Safe vs debug variants
+
+Two preprocessor scripts ship side by side, identical rewrite rules,
+different error handling. Toggle per session:
+
+```sql
+-- Production / day-to-day: any sqlglot failure (parse error, transform
+-- bug, unknown construct) returns the original statement so Exasol gets
+-- to execute or reject it. Exasol-only syntax sails through unchanged.
+ALTER SESSION SET sql_preprocessor_script=UTIL.MARIA_PREPROCESSOR;
+
+-- Development: errors raise as full Python tracebacks via Exasol's
+-- "While preprocessing SQL with..." wrapper, so you can see exactly
+-- where sqlglot or the rewrite logic broke.
+ALTER SESSION SET sql_preprocessor_script=UTIL.MARIA_PREPROCESSOR_DEBUG;
+```
 
 ## Adding or updating UDFs (build from source)
 
