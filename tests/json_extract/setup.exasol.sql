@@ -13,3 +13,5 @@ INSERT INTO json_test VALUES
     (3, '{"b": 300}',                       'Missing Key'),
     (4, '{"a": null}',                      'Explicit Null'),
     (5, '{"a": {"nested": "value"}}',      'Nested Object');
+
+ALTER SESSION SET sql_preprocessor_script=UTIL.MARIA_PREPROCESSOR;

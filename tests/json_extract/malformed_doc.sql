@@ -1,1 +1,1 @@
-SELECT UTIL.JSON_EXTRACT('{not json', '["$.a"]')
+SELECT JSON_EXTRACT('{not json', '$.a')

@@ -1,1 +1,1 @@
-SELECT UTIL.JSON_UNQUOTE('"hello"')
+SELECT JSON_UNQUOTE('"hello"')
