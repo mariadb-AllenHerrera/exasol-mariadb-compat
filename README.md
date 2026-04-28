@@ -9,20 +9,23 @@ installs fresh and updates.
 
 ## Quick start
 
-Pick whichever matches your tooling. Both install the committed
-`dist/mariadb-compat.sql`, which is regenerated on every merge to `main`.
+High level all you need to do is import `dist/mariadb-compat.sql`
 
-### exaplus (or any client that honours the `/` delimiter)
+### 1) Download the latest UDF Compatibility Pack SQL
 
 ```sh
-curl -sSL -o mariadb-compat.sql \
-    https://raw.githubusercontent.com/mariadb-AllenHerrera/exasol-mariadb-compat/main/dist/mariadb-compat.sql
+curl -sSL -o mariadb-compat.sql https://raw.githubusercontent.com/mariadb-AllenHerrera/exasol-mariadb-compat/main/dist/mariadb-compat.sql
+```
+This file is regenerated every PR and contains all the UDFs and main preprocessor function
 
+### 2) Import the SQL file into Exasol
+
+Option A) Via Exaplus
+```sh
 exaplus -c <host>:8563 -u sys -p <pw> -f mariadb-compat.sql
 ```
 
-### Python (pyexasol)
-
+Option B) Via Python(pyexasol)
 ```sh
 git clone https://github.com/mariadb-AllenHerrera/exasol-mariadb-compat.git
 cd exasol-mariadb-compat
