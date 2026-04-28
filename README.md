@@ -98,7 +98,7 @@ stringified so `DECIMAL` / `int` / `float` collapse.
 ```sh
 # Prereq: UTIL.* already installed (see Quick start)
 pip install pyexasol
-python tests/run_tests.py --host <host> --user sys --password <pw> [--no-ssl-verify]
+python tests/run_tests.py --host 127.0.0.1 --user sys --password exasol --port 8563 --no-ssl-verify
 
 # Only one UDF:
 python tests/run_tests.py --udf json_object --no-ssl-verify
