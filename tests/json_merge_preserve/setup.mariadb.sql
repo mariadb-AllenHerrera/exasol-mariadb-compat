@@ -1,0 +1,14 @@
+DROP TABLE IF EXISTS `json_merge_test`;
+
+CREATE TABLE `json_merge_test` (
+    `ID`   INT,
+    `A`    LONGTEXT,
+    `B`    LONGTEXT,
+    PRIMARY KEY (`ID`)
+);
+
+INSERT INTO `json_merge_test` VALUES
+    (1, '{"a": 1, "b": 2}', '{"c": 3, "d": 4}'),
+    (2, '{"a": 1, "b": 2}', '{"a": 9, "c": 3}'),
+    (3, '[1, 2]',           '[3, 4]'),
+    (4, '{"x": 1}',          NULL);

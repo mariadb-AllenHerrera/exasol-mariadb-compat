@@ -59,6 +59,16 @@ def _rewrite_to_util(node):
                      for e in node.expressions]
         return exp.Anonymous(this="UTIL.JSON_UNQUOTE", expressions=new_exprs)
 
+    if (isinstance(node, exp.Anonymous)
+            and isinstance(node.this, str)
+            and node.this.upper() in ("JSON_MERGE_PRESERVE", "JSON_MERGE")):
+        # JSON_MERGE is the deprecated MariaDB alias of JSON_MERGE_PRESERVE.
+        # Same recursion concern as JSON_UNQUOTE above — descend into args
+        # so e.g. JSON_MERGE_PRESERVE(JSON_EXTRACT(doc, '$.a'), ...) still rewrites.
+        new_exprs = [e.transform(_rewrite_to_util) if isinstance(e, exp.Expression) else e
+                     for e in node.expressions]
+        return exp.Anonymous(this="UTIL.JSON_MERGE_PRESERVE", expressions=new_exprs)
+
     return node
 
 
