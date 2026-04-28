@@ -54,6 +54,16 @@ def _rewrite_to_util(node):
             args.append(kv.expression)
         return exp.Anonymous(this="UTIL.JSON_OBJECT", expressions=args)
 
+    if (isinstance(node, exp.Anonymous)
+            and isinstance(node.this, str)
+            and node.this.upper() == "JSON_UNQUOTE"):
+        # sqlglot.transform does not recurse into a replaced node's children,
+        # so apply _rewrite to inner args here — otherwise JSON_UNQUOTE(JSON_EXTRACT(...))
+        # would leave the inner JSON_EXTRACT untransformed and unresolvable on Exasol.
+        new_exprs = [e.transform(_rewrite_to_util) if isinstance(e, exp.Expression) else e
+                     for e in node.expressions]
+        return exp.Anonymous(this="UTIL.JSON_UNQUOTE", expressions=new_exprs)
+
     return node
 
 
