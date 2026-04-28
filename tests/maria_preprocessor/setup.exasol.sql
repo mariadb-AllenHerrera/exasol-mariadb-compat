@@ -2,7 +2,8 @@ DROP TABLE IF EXISTS json_test;
 
 CREATE TABLE json_test (
     "ID"   INT,
-    "JSON" VARCHAR(2000000)
+    "JSON" VARCHAR(2000000),
+    PRIMARY KEY ("ID")
 );
 
 INSERT INTO json_test VALUES

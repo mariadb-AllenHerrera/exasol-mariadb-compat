@@ -1,14 +1,30 @@
 #!/usr/bin/env python3
 """Run UDF regression tests against a running Exasol with UTIL.* installed.
 
-Each subdirectory of tests/ is one UDF group. Inside, optionally a setup.sql
-of fixtures, then one `<name>.sql` + `<name>.expected.json` pair per test case.
-The SQL file holds a single SELECT; the JSON file holds the expected rows as
-a list of lists. Rows are compared stringified so DECIMAL/int/float collapse.
+Each subdirectory of tests/ is one UDF group. Inside, optional per-engine
+fixtures (`setup.exasol.sql` and/or `setup.mariadb.sql`), then one `<name>.sql`
++ `<name>.expected.json` pair per test case. The SQL file holds a single
+SELECT; the JSON file holds the expected rows as a list of lists. Rows are
+compared stringified so DECIMAL/int/float collapse.
+
+Modes:
+  default            run cases on Exasol, compare to .expected.json.
+  --compare-direct   additionally run each case against MariaDB (auto-spawns
+                     a mariadb:11.8 docker container if nothing is on :3306)
+                     and print its output alongside Exasol's.
+  --compare-with-cdc assume a CDC pipe MariaDB → Exasol exists. Validates it
+                     by creating a probe table on MariaDB and waiting (up to
+                     5 s) for it to appear in Exasol. Then per group: skip
+                     setup.exasol.sql DDL/data (CDC owns it; only ALTER
+                     SESSION lines are kept as Exasol session prelude), run
+                     setup.mariadb.sql on MariaDB, wait for CDC to propagate
+                     each created table's row count, then run each case on
+                     both engines.
 
 Prereqs: UTIL.* UDFs installed (run ../install.py first).
 
 Install: pip install pyexasol
+        pip install pymysql   # only if --compare-direct is used
 """
 from __future__ import annotations
 
@@ -28,6 +44,169 @@ def _split_sql(text: str) -> list[str]:
     return [s.strip() for s in text.split(";") if s.strip()]
 
 
+MARIADB_CONTAINER_NAME = "exasol-mariadb-compat-test"
+
+
+def _port_open(host: str, port: int, timeout: float = 2.0) -> bool:
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _is_local(host: str) -> bool:
+    return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+def _docker_available() -> bool:
+    import subprocess
+    try:
+        r = subprocess.run(["docker", "version"], capture_output=True, timeout=5)
+        return r.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _start_mariadb_container(image: str, port: int, password: str) -> None:
+    import subprocess
+    subprocess.run(["docker", "rm", "-f", MARIADB_CONTAINER_NAME], capture_output=True)
+    env = (["-e", f"MARIADB_ROOT_PASSWORD={password}"] if password
+           else ["-e", "MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=yes"])
+    subprocess.run(
+        ["docker", "run", "-d", "--rm",
+         "--name", MARIADB_CONTAINER_NAME,
+         "-p", f"{port}:3306",
+         *env, image],
+        check=True, capture_output=True,
+    )
+
+
+def _stop_mariadb_container() -> None:
+    import subprocess
+    subprocess.run(["docker", "rm", "-f", MARIADB_CONTAINER_NAME], capture_output=True)
+
+
+def _wait_for_mariadb(connect_kwargs: dict, timeout: float = 60.0):
+    import time
+    import pymysql
+    deadline = time.monotonic() + timeout
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            return pymysql.connect(**connect_kwargs)
+        except Exception as e:
+            last_err = e
+            time.sleep(1)
+    raise RuntimeError(f"MariaDB did not become ready within {int(timeout)}s: {last_err}")
+
+
+_CREATE_TABLE_RE = None
+
+
+def _parse_create_tables(sql_text: str) -> list[str]:
+    """Return the bare table names referenced by CREATE TABLE statements.
+    Handles backticks, double quotes, and `IF NOT EXISTS`. Drops db-qualifier."""
+    import re
+    global _CREATE_TABLE_RE
+    if _CREATE_TABLE_RE is None:
+        _CREATE_TABLE_RE = re.compile(
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+            r"(?:[`\"]?\w+[`\"]?\s*\.\s*)?[`\"]?(\w+)[`\"]?",
+            re.IGNORECASE,
+        )
+    return [m.group(1) for m in _CREATE_TABLE_RE.finditer(sql_text)]
+
+
+def _exasol_session_prelude(setup_text: str) -> list[str]:
+    """In CDC mode, only `ALTER SESSION` statements from setup.exasol.sql
+    apply — table/data DDL is owned by CDC, but session knobs (e.g. enabling
+    UTIL.MARIA_PREPROCESSOR) still need to be set on the test session."""
+    return [s for s in _split_sql(setup_text)
+            if s.upper().startswith("ALTER SESSION")]
+
+
+def _cdc_probe(c, mc, schema: str, timeout: float = 5.0) -> None:
+    """Validate the CDC pipe by creating a small PK'd table on MariaDB and
+    waiting for it to appear in Exasol's catalog. Drops the probe afterward."""
+    import time
+    probe = f"_cdc_probe_{int(time.monotonic() * 1000) % 1_000_000}"
+    with mc.cursor() as mcur:
+        mcur.execute(f"DROP TABLE IF EXISTS `{probe}`")
+        mcur.execute(f"CREATE TABLE `{probe}` (id INT PRIMARY KEY)")
+    deadline = time.monotonic() + timeout
+    found = False
+    last_err: Exception | None = None
+    try:
+        while time.monotonic() < deadline:
+            try:
+                rs = c.execute(
+                    "SELECT 1 FROM SYS.EXA_ALL_TABLES "
+                    f"WHERE UPPER(TABLE_SCHEMA) = '{schema.upper()}' "
+                    f"AND UPPER(TABLE_NAME) = '{probe.upper()}'"
+                ).fetchall()
+                if rs:
+                    found = True
+                    break
+            except Exception as e:
+                last_err = e
+            time.sleep(0.25)
+    finally:
+        try:
+            with mc.cursor() as mcur:
+                mcur.execute(f"DROP TABLE IF EXISTS `{probe}`")
+        except Exception:
+            pass
+    if not found:
+        msg = f"CDC probe '{probe}' did not appear in Exasol schema {schema} within {int(timeout)}s"
+        if last_err is not None:
+            msg += f" (last catalog query error: {last_err})"
+        raise RuntimeError(msg)
+
+
+def _wait_for_cdc_propagation(c, mc, schema: str, tables: list[str], timeout: float = 10.0) -> None:
+    """After running setup.mariadb.sql, wait until each created table has the
+    same row count on Exasol as on MariaDB. Schema/table names are matched
+    case-insensitively against SYS.EXA_ALL_TABLES."""
+    import time
+    if not tables:
+        return
+    counts_my: dict[str, int] = {}
+    with mc.cursor() as mcur:
+        for t in tables:
+            mcur.execute(f"SELECT COUNT(*) FROM `{t}`")
+            counts_my[t] = int(mcur.fetchone()[0])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        all_ok = True
+        for t, want in counts_my.items():
+            try:
+                rs = c.execute(
+                    "SELECT TABLE_NAME FROM SYS.EXA_ALL_TABLES "
+                    f"WHERE UPPER(TABLE_SCHEMA) = '{schema.upper()}' "
+                    f"AND UPPER(TABLE_NAME) = '{t.upper()}'"
+                ).fetchall()
+                if not rs:
+                    all_ok = False
+                    break
+                actual = rs[0][0]
+                got = c.execute(f'SELECT COUNT(*) FROM "{schema}"."{actual}"').fetchall()[0][0]
+                if int(got) != want:
+                    all_ok = False
+                    break
+            except Exception:
+                all_ok = False
+                break
+        if all_ok:
+            return
+        time.sleep(0.5)
+    raise RuntimeError(
+        f"CDC fixture propagation timed out after {int(timeout)}s "
+        f"(expected on Exasol {schema}: {counts_my})"
+    )
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--host", default="localhost")
@@ -42,6 +221,29 @@ def main() -> int:
                    help="Ephemeral schema for fixtures (dropped at end)")
     p.add_argument("--udf", action="append", default=None,
                    help="Run only these UDF groups (repeatable; default: all)")
+    p.add_argument("-v", "--verbose", action="count", default=0,
+                   help="Print SQL and result rows for each test (-vv also prints setup SQL)")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--compare-direct", action="store_true",
+                      help="Run each test SQL directly against MariaDB (using setup.mariadb.sql) and "
+                           "print the result alongside Exasol's, marking (DIFF) when stringified rows "
+                           "differ. Does not change pass/fail.")
+    mode.add_argument("--compare-with-cdc", action="store_true",
+                      help="Like --compare-direct, but assumes a CDC pipe MariaDB → Exasol is running. "
+                           "Validates the pipe with a probe table (5 s budget), then for each group runs "
+                           "only setup.mariadb.sql and waits for CDC to propagate the fixtures to Exasol.")
+    p.add_argument("--cdc-timeout", type=float, default=10.0,
+                   help="Seconds to wait for setup.mariadb.sql to propagate to Exasol per group "
+                        "(--compare-with-cdc only; default: 10)")
+    p.add_argument("--mariadb-host", default="127.0.0.1")
+    p.add_argument("--mariadb-port", type=int, default=3306)
+    p.add_argument("--mariadb-user", default="root")
+    p.add_argument("--mariadb-password", default="")
+    p.add_argument("--mariadb-image", default="mariadb:11.8",
+                   help="Image used to auto-spawn a container when --compare-direct can't reach "
+                        "MariaDB (local hosts only). Default: mariadb:11.8")
+    p.add_argument("--no-spawn-mariadb", action="store_true",
+                   help="Disable auto-spawning a MariaDB docker container under --compare-direct")
     args = p.parse_args()
 
     connect_kwargs = dict(dsn=f"{args.host}:{args.port}", user=args.user,
@@ -63,32 +265,150 @@ def main() -> int:
         print(f"[setup] schema creation failed: {e}", file=sys.stderr)
         return 3
 
+    compare_mode: str | None = None
+    if args.compare_direct:
+        compare_mode = "direct"
+    elif args.compare_with_cdc:
+        compare_mode = "cdc"
+
+    mc = None
+    started_container = False
+    if compare_mode is not None:
+        try:
+            import pymysql
+        except ImportError:
+            print(f"[setup] --compare-{compare_mode if compare_mode == 'direct' else 'with-cdc'} "
+                  f"needs pymysql: pip install pymysql", file=sys.stderr)
+            return 3
+
+        connect_kwargs_my = dict(host=args.mariadb_host, port=args.mariadb_port,
+                                 user=args.mariadb_user, password=args.mariadb_password,
+                                 autocommit=True, connect_timeout=3)
+
+        if not _port_open(args.mariadb_host, args.mariadb_port):
+            # Auto-spawn is meaningful only in --compare-direct: a freshly
+            # spawned container has no CDC pipe attached, so spawning under
+            # --compare-with-cdc would just produce a misleading probe failure.
+            spawn_blocked = (args.no_spawn_mariadb or not _is_local(args.mariadb_host)
+                             or compare_mode != "direct")
+            if spawn_blocked:
+                hint = (" (auto-spawn disabled under --compare-with-cdc)"
+                        if compare_mode == "cdc" else "")
+                print(f"[setup] mariadb {args.mariadb_host}:{args.mariadb_port} unreachable{hint}",
+                      file=sys.stderr)
+                return 3
+            if not _docker_available():
+                print("[setup] mariadb unreachable and docker not available; "
+                      "start MariaDB or install docker", file=sys.stderr)
+                return 3
+            print(f"[setup] no MariaDB on :{args.mariadb_port}; "
+                  f"spawning {args.mariadb_image} container...")
+            try:
+                _start_mariadb_container(args.mariadb_image, args.mariadb_port,
+                                         args.mariadb_password)
+                started_container = True
+            except Exception as e:
+                stderr = getattr(e, "stderr", b"")
+                detail = stderr.decode(errors="replace") if isinstance(stderr, bytes) else str(stderr)
+                print(f"[setup] docker run failed: {e}\n{detail}", file=sys.stderr)
+                return 3
+            print("[setup] waiting for mariadb to become ready...")
+            try:
+                mc = _wait_for_mariadb(connect_kwargs_my)
+            except Exception as e:
+                print(f"[setup] {e}", file=sys.stderr)
+                _stop_mariadb_container()
+                return 3
+        else:
+            try:
+                mc = pymysql.connect(**connect_kwargs_my)
+            except Exception as e:
+                print(f"[setup] mariadb connection failed: {e}", file=sys.stderr)
+                return 3
+
+        try:
+            with mc.cursor() as mcur:
+                # In CDC mode the database is shared with the CDC pipe — recreate
+                # it on MariaDB and let CDC propagate the schema reset to Exasol.
+                mcur.execute(f"DROP DATABASE IF EXISTS {args.schema}")
+                mcur.execute(f"CREATE DATABASE {args.schema}")
+                mcur.execute(f"USE {args.schema}")
+        except Exception as e:
+            print(f"[setup] mariadb db init failed: {e}", file=sys.stderr)
+            if started_container:
+                _stop_mariadb_container()
+            return 3
+
+        if compare_mode == "cdc":
+            print("[setup] validating CDC pipe MariaDB → Exasol...")
+            try:
+                _cdc_probe(c, mc, args.schema, timeout=5.0)
+            except Exception as e:
+                print(f"[setup] CDC probe failed: {e}", file=sys.stderr)
+                return 3
+            print("[setup] CDC pipe verified.")
+
     udf_dirs = sorted(d for d in args.tests_dir.iterdir()
                       if d.is_dir() and d.name not in ("__pycache__", "fixtures"))
     if args.udf:
         udf_dirs = [d for d in udf_dirs if d.name in args.udf]
 
+    setup_filenames = {"setup.exasol.sql", "setup.mariadb.sql"}
     passed = failed = 0
     for udf_dir in udf_dirs:
         # Always start each group with the preprocessor OFF so setup SQL is
         # parsed as Exasol-native. Groups that exercise the preprocessor
-        # (e.g. maria_preprocessor/) turn it back on in their setup.sql.
+        # (e.g. maria_preprocessor/) turn it back on in their setup.exasol.sql.
         try:
             c.execute("ALTER SESSION SET sql_preprocessor_script=''")
         except Exception:
             pass
 
-        setup = udf_dir / "setup.sql"
-        if setup.exists():
+        setup_exasol = udf_dir / "setup.exasol.sql"
+        if setup_exasol.exists():
+            # In CDC mode we keep only ALTER SESSION lines (e.g. enabling
+            # UTIL.MARIA_PREPROCESSOR for the maria_preprocessor group);
+            # tables and rows arrive on Exasol via CDC.
+            stmts = (_exasol_session_prelude(setup_exasol.read_text())
+                     if compare_mode == "cdc"
+                     else _split_sql(setup_exasol.read_text()))
             try:
-                for stmt in _split_sql(setup.read_text()):
+                for stmt in stmts:
+                    if args.verbose >= 2:
+                        print(f"[setup-exasol] {udf_dir.name}: {stmt}")
                     c.execute(stmt)
             except Exception as e:
-                print(f"[FAIL] {udf_dir.name}/setup: {e}", file=sys.stderr)
+                print(f"[FAIL] {udf_dir.name}/setup.exasol: {e}", file=sys.stderr)
                 failed += 1
                 continue
 
-        cases = sorted(f for f in udf_dir.glob("*.sql") if f.name != "setup.sql")
+        setup_mariadb = udf_dir / "setup.mariadb.sql"
+        if mc is not None and setup_mariadb.exists():
+            setup_text = setup_mariadb.read_text()
+            try:
+                for stmt in _split_sql(setup_text):
+                    if args.verbose >= 2:
+                        print(f"[setup-mariadb] {udf_dir.name}: {stmt}")
+                    with mc.cursor() as mcur:
+                        mcur.execute(stmt)
+            except Exception as e:
+                print(f"[FAIL] {udf_dir.name}/setup.mariadb: {e}", file=sys.stderr)
+                failed += 1
+                continue
+            if compare_mode == "cdc":
+                tables = _parse_create_tables(setup_text)
+                if args.verbose:
+                    print(f"[cdc-wait] {udf_dir.name}: waiting for {tables} on Exasol "
+                          f"(timeout {args.cdc_timeout:g}s)")
+                try:
+                    _wait_for_cdc_propagation(c, mc, args.schema, tables,
+                                              timeout=args.cdc_timeout)
+                except Exception as e:
+                    print(f"[FAIL] {udf_dir.name}/cdc-wait: {e}", file=sys.stderr)
+                    failed += 1
+                    continue
+
+        cases = sorted(f for f in udf_dir.glob("*.sql") if f.name not in setup_filenames)
         for sql_file in cases:
             name = sql_file.stem
             expected_file = sql_file.with_suffix(".expected.json")
@@ -96,8 +416,12 @@ def main() -> int:
                 print(f"[skip] {udf_dir.name}/{name}: no .expected.json")
                 continue
             label = f"{udf_dir.name}/{name}"
+            sql_text = sql_file.read_text()
+            if args.verbose:
+                print(f"[run]  {label}")
+                print(f"       sql     : {sql_text.strip()}")
             try:
-                rows = [list(r) for r in c.execute(sql_file.read_text()).fetchall()]
+                rows = [list(r) for r in c.execute(sql_text).fetchall()]
                 expected = json.loads(expected_file.read_text())
             except Exception as e:
                 print(f"[FAIL] {label}: {e}", file=sys.stderr)
@@ -106,12 +430,25 @@ def main() -> int:
 
             if [[str(x) for x in r] for r in rows] == [[str(x) for x in r] for r in expected]:
                 print(f"[ok]   {label}")
+                if args.verbose:
+                    print(f"       actual  : {rows}")
                 passed += 1
             else:
                 print(f"[FAIL] {label}", file=sys.stderr)
                 print(f"       expected: {expected}", file=sys.stderr)
                 print(f"       actual  : {rows}", file=sys.stderr)
                 failed += 1
+
+            if mc is not None:
+                try:
+                    with mc.cursor() as mcur:
+                        mcur.execute(sql_text)
+                        mrows = [list(r) for r in (mcur.fetchall() or ())]
+                    diff = "" if ([[str(x) for x in r] for r in mrows]
+                                  == [[str(x) for x in r] for r in rows]) else " (DIFF)"
+                    print(f"       mariadb : {mrows}{diff}")
+                except Exception as e:
+                    print(f"       mariadb : ERROR: {e}")
 
     try:
         c.execute("ALTER SESSION SET sql_preprocessor_script=''")
@@ -121,6 +458,20 @@ def main() -> int:
         c.execute(f"DROP SCHEMA {args.schema} CASCADE")
     except Exception:
         pass
+
+    if mc is not None:
+        try:
+            with mc.cursor() as mcur:
+                mcur.execute(f"DROP DATABASE IF EXISTS {args.schema}")
+        except Exception:
+            pass
+        try:
+            mc.close()
+        except Exception:
+            pass
+    if started_container:
+        print("[setup] removing mariadb container...")
+        _stop_mariadb_container()
 
     total = passed + failed
     print(f"\n{passed}/{total} passed" + (f", {failed} failed" if failed else ""))

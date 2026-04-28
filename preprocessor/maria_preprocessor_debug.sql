@@ -42,12 +42,6 @@ def _rewrite_to_util(node):
             expressions=[node.this, exp.Literal.string(json.dumps(paths))],
         )
 
-    if isinstance(node, exp.JSONExtractScalar):
-        return exp.Anonymous(
-            this="JSON_VALUE",
-            expressions=[node.this, node.expression],
-        )
-
     if isinstance(node, exp.JSONObject):
         args = []
         for kv in node.expressions:

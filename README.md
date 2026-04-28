@@ -60,8 +60,7 @@ UDF here, add a corresponding branch to `_rewrite_to_util` in **both**
 `maria_preprocessor.sql` and `maria_preprocessor_debug.sql` in the same PR.
 Currently covered:
 
-- `JSON_EXTRACT` / `->` → `UTIL.JSON_EXTRACT`
-- `->>` → `JSON_VALUE` (native Exasol)
+- `JSON_EXTRACT` → `UTIL.JSON_EXTRACT`
 - `JSON_OBJECT` → `UTIL.JSON_OBJECT`
 
 #### Safe vs debug variants
@@ -91,9 +90,10 @@ ALTER SESSION SET sql_preprocessor_script=UTIL.MARIA_PREPROCESSOR_DEBUG;
 
 ## Testing
 
-Each UDF has a directory under `tests/` with optional `setup.sql` fixtures
-plus `<case>.sql` + `<case>.expected.json` pairs. Rows are compared
-stringified so `DECIMAL` / `int` / `float` collapse.
+Each UDF has a directory under `tests/` with optional per-engine fixtures
+(`setup.exasol.sql` and/or `setup.mariadb.sql`) plus `<case>.sql` +
+`<case>.expected.json` pairs. Rows are compared stringified so `DECIMAL` /
+`int` / `float` collapse.
 
 ```sh
 # Prereq: UTIL.* already installed (see Quick start)
@@ -102,11 +102,27 @@ python tests/run_tests.py --host 127.0.0.1 --user sys --password exasol --port 8
 
 # Only one UDF:
 python tests/run_tests.py --udf json_object --no-ssl-verify
+
+# Cross-check each case against MariaDB (auto-spawns mariadb:11.8 on :3306
+# if nothing's there; needs `pip install pymysql`):
+python tests/run_tests.py --compare-direct --no-ssl-verify
+
+# End-to-end check via an existing CDC pipe MariaDB → Exasol. Skips
+# setup.exasol.sql DDL/data (CDC owns it; only ALTER SESSION lines are kept
+# as session prelude), runs setup.mariadb.sql on MariaDB, and waits for CDC
+# to propagate before running each case on both engines:
+python tests/run_tests.py --compare-with-cdc --no-ssl-verify \
+    --mariadb-user admin_user --mariadb-password 'aBc123%%'
 ```
 
 The runner creates an ephemeral `MARIADB_COMPAT_TEST` schema, runs each
-group's `setup.sql` inside it, executes every case, then `DROP SCHEMA ...
-CASCADE`s. No persistent state.
+group's `setup.exasol.sql` inside it, executes every case, then drops the
+schema. Under `--compare-direct` it also creates a same-named MariaDB
+database, runs `setup.mariadb.sql`, and prints each case's MariaDB output
+alongside Exasol's. Under `--compare-with-cdc` only `setup.mariadb.sql`
+runs on MariaDB; tables and rows arrive on Exasol via CDC, validated with
+a probe table at startup and per-group row-count polling. No persistent
+state.
 
 ## Layout
 
