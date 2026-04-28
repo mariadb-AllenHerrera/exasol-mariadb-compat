@@ -74,6 +74,24 @@ def _rewrite_to_util(node):
                      for e in node.expressions]
         return exp.Anonymous(this="UTIL.JSON_MERGE_PRESERVE", expressions=new_exprs)
 
+    if (isinstance(node, exp.Anonymous)
+            and isinstance(node.this, str)
+            and node.this.upper() == "ELT"):
+        # The SLC's bundled sqlglot (currently 27.6.0) parses ELT as Anonymous —
+        # this branch is what fires today. Same recursion rule as JSON_UNQUOTE.
+        new_exprs = [e.transform(_rewrite_to_util) if isinstance(e, exp.Expression) else e
+                     for e in node.expressions]
+        return exp.Anonymous(this="UTIL.ELT", expressions=new_exprs)
+
+    # Newer sqlglot exposes a typed exp.Elt node (this=N, expressions=[strs...]).
+    # Guarded with getattr so the preprocessor doesn't crash on the older SLC.
+    _Elt = getattr(exp, "Elt", None)
+    if _Elt is not None and isinstance(node, _Elt):
+        args = [node.this, *node.expressions]
+        new_args = [a.transform(_rewrite_to_util) if isinstance(a, exp.Expression) else a
+                    for a in args]
+        return exp.Anonymous(this="UTIL.ELT", expressions=new_args)
+
     return node
 
 
