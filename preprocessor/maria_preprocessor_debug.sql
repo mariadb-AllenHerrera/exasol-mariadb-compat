@@ -87,6 +87,16 @@ def _rewrite_to_util(node):
                     for a in args]
         return exp.Anonymous(this="UTIL.ELT", expressions=new_args)
 
+    if (isinstance(node, exp.Anonymous)
+            and isinstance(node.this, str)
+            and node.this.upper() == "FIELD"):
+        # FIELD is the complement of ELT: index of `str` in the trailing list.
+        # sqlglot has no typed node for it (in 27.x or 30.x), so Anonymous is
+        # the only shape we need to handle. Same recursion rule as JSON_UNQUOTE.
+        new_exprs = [e.transform(_rewrite_to_util) if isinstance(e, exp.Expression) else e
+                     for e in node.expressions]
+        return exp.Anonymous(this="UTIL.FIELD", expressions=new_exprs)
+
     return node
 
 
