@@ -1,0 +1,1 @@
+SELECT 300 DIV 7

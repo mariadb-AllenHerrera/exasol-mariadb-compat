@@ -1,0 +1,1 @@
+SELECT CASE WHEN 'hello world' REGEXP '^hello' THEN 1 ELSE 0 END
