@@ -131,7 +131,10 @@ def _cdc_probe(c, mc, schema: str, timeout: float = 5.0) -> None:
     """Validate the CDC pipe by creating a small PK'd table on MariaDB and
     waiting for it to appear in Exasol's catalog. Drops the probe afterward."""
     import time
-    probe = f"_cdc_probe_{int(time.monotonic() * 1000) % 1_000_000}"
+    # No leading underscore: the CDC consumer emits unquoted identifiers
+    # (e.g. `DROP TABLE IF EXISTS SCHEMA._cdc_probe_X`) and Exasol's parser
+    # rejects an unquoted name that starts with `_`.
+    probe = f"cdc_probe_{int(time.monotonic() * 1000) % 1_000_000}"
     with mc.cursor() as mcur:
         mcur.execute(f"DROP TABLE IF EXISTS `{probe}`")
         mcur.execute(f"CREATE TABLE `{probe}` (id INT PRIMARY KEY)")
@@ -159,7 +162,8 @@ def _cdc_probe(c, mc, schema: str, timeout: float = 5.0) -> None:
         except Exception:
             pass
     if not found:
-        msg = f"CDC probe '{probe}' did not appear in Exasol schema {schema} within {int(timeout)}s"
+        msg = (f"CDC probe '{probe}' did not appear in Exasol schema {schema} within {int(timeout)}s"
+               f" — raise --cdc-probe-timeout if the pipe is just slow")
         if last_err is not None:
             msg += f" (last catalog query error: {last_err})"
         raise RuntimeError(msg)
@@ -215,6 +219,10 @@ def main() -> int:
     p.add_argument("--password", default="exasol")
     p.add_argument("--no-ssl-verify", action="store_true",
                    help="Skip Exasol TLS cert validation (for docker-db's self-signed cert)")
+    p.add_argument("--script-language", default=None,
+                   help="If set, run ALTER SESSION SET SCRIPT_LANGUAGES='<value>' before tests, "
+                        "to pin the SLC under test (e.g. a custom-built one carrying a specific "
+                        "sqlglot version). The full SCRIPT_LANGUAGES value is taken verbatim.")
     p.add_argument("--tests-dir", type=Path, default=Path(__file__).parent,
                    help="Directory to scan for UDF test subdirs (default: this script's dir)")
     p.add_argument("--schema", default="MARIADB_COMPAT_TEST",
@@ -235,6 +243,9 @@ def main() -> int:
     p.add_argument("--cdc-timeout", type=float, default=10.0,
                    help="Seconds to wait for setup.mariadb.sql to propagate to Exasol per group "
                         "(--compare-with-cdc only; default: 10)")
+    p.add_argument("--cdc-probe-timeout", type=float, default=5.0,
+                   help="Seconds to wait for the initial CDC probe table to appear in Exasol "
+                        "(--compare-with-cdc only; default: 5)")
     p.add_argument("--mariadb-host", default="127.0.0.1")
     p.add_argument("--mariadb-port", type=int, default=3306)
     p.add_argument("--mariadb-user", default="root")
@@ -258,12 +269,30 @@ def main() -> int:
         print(f"[setup] connection failed: {e}", file=sys.stderr)
         return 3
 
+    if args.script_language:
+        escaped = args.script_language.replace("'", "''")
+        stmt = f"ALTER SESSION SET SCRIPT_LANGUAGES='{escaped}'"
+        try:
+            c.execute(stmt)
+            if args.verbose >= 2:
+                print(f"[setup] {stmt}")
+        except Exception as e:
+            print(f"[setup] ALTER SESSION SET SCRIPT_LANGUAGES failed: {e}", file=sys.stderr)
+            return 3
+
     try:
         c.execute(f"CREATE SCHEMA IF NOT EXISTS {args.schema}")
         c.execute(f"OPEN SCHEMA {args.schema}")
     except Exception as e:
         print(f"[setup] schema creation failed: {e}", file=sys.stderr)
         return 3
+
+    try:
+        gv = c.execute("SELECT UTIL.GET_GLOT_VERSION()").fetchall()
+        print(f"[setup] sqlglot in active SLC: {gv[0][0] if gv else 'unknown'}")
+    except Exception as e:
+        print(f"[setup] sqlglot version probe failed (UTIL.GET_GLOT_VERSION not installed?): {e}",
+              file=sys.stderr)
 
     compare_mode: str | None = None
     if args.compare_direct:
@@ -342,7 +371,7 @@ def main() -> int:
         if compare_mode == "cdc":
             print("[setup] validating CDC pipe MariaDB → Exasol...")
             try:
-                _cdc_probe(c, mc, args.schema, timeout=5.0)
+                _cdc_probe(c, mc, args.schema, timeout=args.cdc_probe_timeout)
             except Exception as e:
                 print(f"[setup] CDC probe failed: {e}", file=sys.stderr)
                 return 3
@@ -421,7 +450,13 @@ def main() -> int:
                 print(f"[run]  {label}")
                 print(f"       sql     : {sql_text.strip()}")
             try:
-                rows = [list(r) for r in c.execute(sql_text).fetchall()]
+                stmt = c.execute(sql_text)
+                # Non-SELECT statements (USE -> OPEN SCHEMA, DDL, DML) report
+                # result_type='rowCount' and raise on fetchall(); treat as [].
+                if getattr(stmt, "result_type", "resultSet") == "resultSet":
+                    rows = [list(r) for r in stmt.fetchall()]
+                else:
+                    rows = []
                 expected = json.loads(expected_file.read_text())
             except Exception as e:
                 print(f"[FAIL] {label}: {e}", file=sys.stderr)
