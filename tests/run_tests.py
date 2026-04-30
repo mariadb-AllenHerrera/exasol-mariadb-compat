@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -42,6 +43,31 @@ except ImportError:
 
 def _split_sql(text: str) -> list[str]:
     return [s.strip() for s in text.split(";") if s.strip()]
+
+
+def _reload_udfs_and_preprocessor(c, repo_root: Path, verbose: int = 0) -> int:
+    """Run dist/mariadb-compat.sql against the open connection so the test
+    session always exercises the working-tree bundle. Statements are
+    separated by `/` on its own line (Exaplus convention emitted by
+    build.sh); blank chunks are skipped. Returns the count of statements
+    actually executed."""
+    bundle = repo_root / "dist" / "mariadb-compat.sql"
+    if not bundle.exists():
+        raise FileNotFoundError(
+            f"{bundle} not found — run ./build.sh to regenerate, or pass --no-reload"
+        )
+    chunks = re.split(r"(?m)^\s*/\s*$", bundle.read_text())
+    executed = 0
+    for chunk in chunks:
+        stmt = chunk.strip().rstrip(";")
+        if not stmt:
+            continue
+        if verbose >= 2:
+            head = stmt.splitlines()[0][:80]
+            print(f"[reload] {head}")
+        c.execute(stmt)
+        executed += 1
+    return executed
 
 
 MARIADB_CONTAINER_NAME = "exasol-mariadb-compat-test"
@@ -225,6 +251,15 @@ def main() -> int:
                         "sqlglot version). The full SCRIPT_LANGUAGES value is taken verbatim.")
     p.add_argument("--tests-dir", type=Path, default=Path(__file__).parent,
                    help="Directory to scan for UDF test subdirs (default: this script's dir)")
+    p.add_argument("--no-reload", action="store_true",
+                   help="Skip the install-from-disk step. By default each run executes "
+                        "dist/mariadb-compat.sql from this checkout into the DB before "
+                        "running tests, so the test target is always the working-tree bundle. "
+                        "Run ./build.sh first if you've edited UDFs or the preprocessor.")
+    p.add_argument("--repo-root", type=Path,
+                   default=Path(__file__).resolve().parent.parent,
+                   help="Repo root used by the reload step (looks up dist/mariadb-compat.sql "
+                        "underneath; default: parent of tests/)")
     p.add_argument("--schema", default="MARIADB_COMPAT_TEST",
                    help="Ephemeral schema for fixtures (dropped at end)")
     p.add_argument("--udf", action="append", default=None,
@@ -278,6 +313,14 @@ def main() -> int:
                 print(f"[setup] {stmt}")
         except Exception as e:
             print(f"[setup] ALTER SESSION SET SCRIPT_LANGUAGES failed: {e}", file=sys.stderr)
+            return 3
+
+    if not args.no_reload:
+        try:
+            n = _reload_udfs_and_preprocessor(c, args.repo_root, verbose=args.verbose)
+            print(f"[reload] {n} statements from {args.repo_root}/dist/mariadb-compat.sql")
+        except Exception as e:
+            print(f"[reload] failed: {e}", file=sys.stderr)
             return 3
 
     try:
