@@ -32,28 +32,23 @@ def _transpile(request):
 
 
 def _rewrite_to_util(node):
-    if isinstance(node, exp.SetItem) and node.args.get("kind") == "NAMES":
+    if isinstance(node, exp.Set):
         # MariaDB connectors emit `SET NAMES <charset> [COLLATE <c>]` as a
-        # connection-init handshake; Exasol exposes the equivalent as
-        # `SET ENCODING <charset>`. Rewriting at the AST level here means
-        # we don't depend on the SLC's sqlglot carrying the upstream fix —
-        # whatever the generator emits, the kind is already ENCODING.
-        # MariaDB↔Exasol encoding overlap: ascii, latin1, utf8 (the names
-        # round-trip 1:1). utf8mb4 is MariaDB's full-Unicode 4-byte UTF-8
-        # and maps to Exasol's plain `utf8`, also full Unicode. Other names
-        # pass through; Exasol errors on ones it doesn't recognize.
-        charset = node.this
-        new_charset = charset
-        if (charset is not None
-                and getattr(charset, "name", "").lower() == "utf8mb4"):
-            new_charset = (exp.Literal.string("utf8")
-                           if isinstance(charset, exp.Literal)
-                           else exp.Var(this="utf8"))
-        new_node = node.copy()
-        new_node.set("kind", "ENCODING")
-        new_node.set("collate", None)  # COLLATE has no Exasol equivalent
-        new_node.set("this", new_charset)
-        return new_node
+        # connection-init handshake (client/server text encoding negotiation).
+        # Exasol has no equivalent — it stores everything as UTF-8 internally,
+        # and rejects standalone `SET <var>` / `SET ENCODING` via the WebSocket
+        # protocol with "syntax error, unexpected IDENTIFIER_PART_". Rewrite
+        # to a comment-only statement (Exasol parses comments as no-ops with
+        # result_type=rowCount), so the handshake silently succeeds.
+        items = node.expressions or []
+        if (len(items) == 1
+                and isinstance(items[0], exp.SetItem)
+                and items[0].args.get("kind") == "NAMES"):
+            return exp.Command(
+                this="--",
+                expression=exp.Literal.string(
+                    " mariadb SET NAMES is a no-op on Exasol"),
+            )
 
     if isinstance(node, exp.CTE):
         # Exasol requires every CTE projection to have a name (alias or column
