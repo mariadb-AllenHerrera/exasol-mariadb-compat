@@ -150,3 +150,33 @@ exasol-mariadb-compat/
 The first line of `dist/mariadb-compat.sql` carries the version, filled in by
 `build.sh` from `git describe`. Tag releases (`v0.1.0`, `v0.2.0`, …) when you
 cut one.
+
+## Known semantic gaps
+
+These are MariaDB behaviors the preprocessor deliberately does **not** try to
+emulate, because any "fix" would be wrong in enough cases to do more harm
+than good. Write the explicit form in your MariaDB source and the
+transpilation works on both engines.
+
+### `GROUP_CONCAT` without `ORDER BY`
+
+MariaDB's `GROUP_CONCAT(col)` (no `ORDER BY` clause) often comes out in
+auto-increment-PK order — not because it's specified, but because of how
+InnoDB happens to return rows. sqlglot transpiles this to Exasol's
+`LISTAGG(col, ',')`, which is genuinely non-deterministic without a
+`WITHIN GROUP (ORDER BY ...)`.
+
+We considered injecting an `ORDER BY <pk>` automatically and decided
+against it. The heuristic only works for single-table queries with a
+single-column auto-increment PK; joins, subqueries, CTEs, composite PKs,
+and UUID PKs all produce wrong-but-runs SQL that fails far away from the
+typo. The honest answer is to write the order you want in MariaDB:
+
+```sql
+-- portable
+SELECT GROUP_CONCAT(name ORDER BY id) FROM users;
+
+-- if you don't actually care about order, sort on the column itself —
+-- deterministic on both engines:
+SELECT GROUP_CONCAT(name ORDER BY name) FROM users;
+```
