@@ -32,6 +32,29 @@ def _transpile(request):
 
 
 def _rewrite_to_util(node):
+    if isinstance(node, exp.SetItem) and node.args.get("kind") == "NAMES":
+        # MariaDB connectors emit `SET NAMES <charset> [COLLATE <c>]` as a
+        # connection-init handshake; Exasol exposes the equivalent as
+        # `SET ENCODING <charset>`. Rewriting at the AST level here means
+        # we don't depend on the SLC's sqlglot carrying the upstream fix —
+        # whatever the generator emits, the kind is already ENCODING.
+        # MariaDB↔Exasol encoding overlap: ascii, latin1, utf8 (the names
+        # round-trip 1:1). utf8mb4 is MariaDB's full-Unicode 4-byte UTF-8
+        # and maps to Exasol's plain `utf8`, also full Unicode. Other names
+        # pass through; Exasol errors on ones it doesn't recognize.
+        charset = node.this
+        new_charset = charset
+        if (charset is not None
+                and getattr(charset, "name", "").lower() == "utf8mb4"):
+            new_charset = (exp.Literal.string("utf8")
+                           if isinstance(charset, exp.Literal)
+                           else exp.Var(this="utf8"))
+        new_node = node.copy()
+        new_node.set("kind", "ENCODING")
+        new_node.set("collate", None)  # COLLATE has no Exasol equivalent
+        new_node.set("this", new_charset)
+        return new_node
+
     if isinstance(node, exp.CTE):
         # Exasol requires every CTE projection to have a name (alias or column
         # reference); MariaDB happily accepts bare literals/expressions and
