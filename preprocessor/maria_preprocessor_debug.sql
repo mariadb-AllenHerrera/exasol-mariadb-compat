@@ -32,6 +32,22 @@ def _transpile(request):
 
 
 def _rewrite_to_util(node):
+    if isinstance(node, exp.CTE):
+        # Exasol requires every CTE projection to have a name (alias or column
+        # reference); MariaDB happily accepts bare literals/expressions and
+        # synthesizes a display name. For each projection inside the CTE body
+        # — including each branch of a UNION/INTERSECT/EXCEPT chain — that has
+        # no implicit name, inject AS _col<i>. An explicit outer column list
+        # (WITH t(a,b) AS ...) still wins, so this is at worst verbose, never
+        # wrong.
+        inner = node.this
+        if isinstance(inner, exp.Select):
+            _alias_unaliased_select(inner)
+        elif isinstance(inner, exp.Union):
+            for sub in inner.find_all(exp.Select):
+                _alias_unaliased_select(sub)
+        return node
+
     if isinstance(node, exp.JSONExtract) and not node.args.get("emits"):
         paths = []
         if node.expression is not None:
@@ -104,3 +120,13 @@ def _strip_sql_quotes(rendered):
     if len(rendered) >= 2 and rendered[0] == "'" and rendered[-1] == "'":
         return rendered[1:-1].replace("''", "'")
     return rendered
+
+
+def _alias_unaliased_select(select):
+    new_projs = []
+    for i, proj in enumerate(select.expressions):
+        if isinstance(proj, (exp.Alias, exp.Column, exp.Star)):
+            new_projs.append(proj)
+        else:
+            new_projs.append(exp.alias_(proj, f"_col{i}"))
+    select.set("expressions", new_projs)

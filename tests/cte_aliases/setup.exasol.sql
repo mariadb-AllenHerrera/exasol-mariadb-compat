@@ -1,0 +1,1 @@
+ALTER SESSION SET sql_preprocessor_script=UTIL.MARIA_PREPROCESSOR;
