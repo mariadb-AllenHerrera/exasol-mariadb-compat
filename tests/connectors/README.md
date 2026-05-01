@@ -47,8 +47,9 @@ Per-request lines (one per stdin line, in order):
 | `nodejs/`         | `mariadb-connector-nodejs@2.x` | `cd nodejs && npm install` |
 | `python_mariadb/` | `mariadb-connector-python` (libmariadb-backed) | `pip install -r python_mariadb/requirements.txt` |
 | `python_pymysql/` | `pymysql` (pure Python) | `pip install -r python_pymysql/requirements.txt` |
+| `java/`           | MariaDB Connector/J (JDBC) | `cd java && ./fetch-deps.sh` (needs JDK 11+ on PATH) |
 
-(More to come — c, c++, java, odbc.)
+(More to come — c, c++, odbc.)
 
 ## Master-side invocation
 

@@ -6,6 +6,8 @@ venv/
 .idea/
 .vscode/
 
-# Per-connector dependency installs — regenerable from package.json / requirements.txt
+# Per-connector dependency installs — regenerable from package.json / requirements.txt / fetch-deps.sh
 tests/connectors/*/node_modules/
 tests/connectors/*/.venv/
+tests/connectors/*/lib/
+tests/connectors/java/*.class
