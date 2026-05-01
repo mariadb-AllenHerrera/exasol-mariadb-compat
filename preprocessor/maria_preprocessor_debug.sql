@@ -32,6 +32,20 @@ def _transpile(request):
 
 
 def _rewrite_to_util(node):
+    if (isinstance(node, exp.Column)
+            and node.table == ""
+            and node.name
+            and node.name.upper() in _EXASOL_BARE_KEYWORDS):
+        # sqlglot parses bare `CURRENT_SESSION` / `CURRENT_STATEMENT` /
+        # `CURRENT_SCHEMA` as generic Columns (no typed node like
+        # exp.CurrentUser / exp.CurrentDate), so the Exasol generator quotes
+        # them as identifiers — `SELECT "CURRENT_SESSION"` — and Exasol then
+        # can't resolve the pseudo-column. MaxScale's mariadb_smartrouter
+        # emits `SELECT CURRENT_SESSION` as a backend probe, so an unfixed
+        # preprocessor breaks every connector through MaxScale + ExasolRouter.
+        # exp.Var emits the bare unquoted name.
+        return exp.Var(this=node.name)
+
     if isinstance(node, exp.Set):
         # MariaDB connectors emit `SET NAMES <charset> [COLLATE <c>]` as a
         # connection-init handshake (client/server text encoding negotiation).
@@ -138,6 +152,13 @@ def _strip_sql_quotes(rendered):
     if len(rendered) >= 2 and rendered[0] == "'" and rendered[-1] == "'":
         return rendered[1:-1].replace("''", "'")
     return rendered
+
+
+_EXASOL_BARE_KEYWORDS = frozenset({
+    "CURRENT_SESSION",
+    "CURRENT_STATEMENT",
+    "CURRENT_SCHEMA",
+})
 
 
 def _alias_unaliased_select(select):

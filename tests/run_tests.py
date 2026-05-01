@@ -45,6 +45,81 @@ def _split_sql(text: str) -> list[str]:
     return [s.strip() for s in text.split(";") if s.strip()]
 
 
+# {connector_name: (interpreter, script_filename)} — each runner lives at
+# tests/connectors/<name>/<script_filename> and implements the JSON Lines
+# protocol documented in tests/connectors/README.md. Adding a new connector
+# is a one-line entry plus the runner file.
+_CONNECTOR_RUNNERS = {
+    "nodejs":         ("node",    "runner.js"),
+    "python_mariadb": ("python3", "runner.py"),
+    "python_pymysql": ("python3", "runner.py"),
+}
+
+
+class _PyexasolRunner:
+    """Default runner: executes test SQL on the existing pyexasol connection."""
+
+    name = "pyexasol"
+
+    def __init__(self, c):
+        self.c = c
+
+    def execute(self, name: str, sql: str) -> list[list]:
+        stmt = self.c.execute(sql)
+        if getattr(stmt, "result_type", "resultSet") == "resultSet":
+            return [list(r) for r in stmt.fetchall()]
+        return []
+
+    def close(self):
+        pass
+
+
+class _SubprocessRunner:
+    """Driver-mode JSON Lines runner — talks to a long-lived subprocess that
+    implements the protocol documented under tests/connectors/README.md."""
+
+    def __init__(self, name: str, cmd: list[str]):
+        import subprocess
+        self.name = name
+        self.proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, bufsize=1,
+        )
+        # Wait for the ready/error event before driving requests through.
+        first = self.proc.stdout.readline()
+        if not first:
+            err = self.proc.stderr.read()
+            raise RuntimeError(f"{name} runner exited before ready: {err.strip()}")
+        evt = json.loads(first)
+        if evt.get("event") == "error":
+            raise RuntimeError(f"{name} runner connect failed: {evt.get('error')}")
+        if evt.get("event") != "ready":
+            raise RuntimeError(f"{name} runner unexpected first line: {first!r}")
+        self.driver = evt.get("driver", "?")
+
+    def execute(self, name: str, sql: str) -> list[list]:
+        self.proc.stdin.write(json.dumps({"name": name, "sql": sql}) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            err = self.proc.stderr.read()
+            raise RuntimeError(f"{self.name} runner died: {err.strip()}")
+        result = json.loads(line)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "unknown error"))
+        return [list(r) for r in (result.get("rows") or [])]
+
+    def close(self):
+        try:
+            self.proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.proc.wait(timeout=5)
+        except Exception:
+            self.proc.kill()
+
+
 def _reload_udfs_and_preprocessor(c, repo_root: Path, verbose: int = 0) -> int:
     """Run dist/mariadb-compat.sql against the open connection so the test
     session always exercises the working-tree bundle. Statements are
@@ -251,6 +326,18 @@ def main() -> int:
                         "sqlglot version). The full SCRIPT_LANGUAGES value is taken verbatim.")
     p.add_argument("--tests-dir", type=Path, default=Path(__file__).parent,
                    help="Directory to scan for UDF test subdirs (default: this script's dir)")
+    p.add_argument("--connector", default="pyexasol",
+                   choices=["pyexasol", *_CONNECTOR_RUNNERS.keys()],
+                   help="Which client executes test SQL. 'pyexasol' (default) "
+                        "talks Exasol direct on --port. Other values spawn a "
+                        "long-lived runner under tests/connectors/<name>/ and "
+                        "talk to it via JSON Lines on stdin/stdout. Connector "
+                        "runs go via MaxScale at --maxscale-host:--maxscale-port "
+                        "using --mariadb-user/--mariadb-password.")
+    p.add_argument("--maxscale-host", default="127.0.0.1",
+                   help="MaxScale host for non-pyexasol connectors (default: 127.0.0.1)")
+    p.add_argument("--maxscale-port", type=int, default=3309,
+                   help="MaxScale port for non-pyexasol connectors (default: 3309)")
     p.add_argument("--no-reload", action="store_true",
                    help="Skip the install-from-disk step. By default each run executes "
                         "dist/mariadb-compat.sql from this checkout into the DB before "
@@ -336,6 +423,73 @@ def main() -> int:
     except Exception as e:
         print(f"[setup] sqlglot version probe failed (UTIL.GET_GLOT_VERSION not installed?): {e}",
               file=sys.stderr)
+
+    # Build the test-execution runner. pyexasol reuses the existing connection
+    # (Exasol direct). Other connectors talk to MaxScale via a subprocess
+    # implementing the JSON Lines driver protocol.
+    if args.connector == "pyexasol":
+        runner = _PyexasolRunner(c)
+    elif args.connector in _CONNECTOR_RUNNERS:
+        interp, script = _CONNECTOR_RUNNERS[args.connector]
+        runner_dir = Path(__file__).resolve().parent / "connectors" / args.connector
+        cmd = [
+            interp, str(runner_dir / script),
+            "--host", args.maxscale_host,
+            "--port", str(args.maxscale_port),
+            "--user", args.mariadb_user,
+            "--password", args.mariadb_password,
+        ]
+        try:
+            runner = _SubprocessRunner(args.connector, cmd)
+            print(f"[setup] connector: {args.connector} ({runner.driver}) -> "
+                  f"{args.maxscale_host}:{args.maxscale_port}")
+            # The runner opens its own DB session over MaxScale, so the
+            # SCRIPT_LANGUAGES pin we set on the pyexasol session above
+            # does NOT apply here — re-issue it via the runner so UDF/
+            # preprocessor calls hit the SLC the user actually requested.
+            # Best-effort: ALTER SESSION SET responses also have the
+            # rowCount-shaped packet that some connectors (e.g. pymysql via
+            # MaxScale + ExasolRouter) can't parse.
+            if args.script_language:
+                escaped = args.script_language.replace("'", "''")
+                stmt = f"ALTER SESSION SET SCRIPT_LANGUAGES='{escaped}'"
+                try:
+                    runner.execute("__set_script_languages__", stmt)
+                    if args.verbose >= 2:
+                        print(f"[setup] ({args.connector}) {stmt}")
+                except Exception as e:
+                    print(f"[setup] {args.connector}: SCRIPT_LANGUAGES pin "
+                          f"failed ({e}); SLC may not match --script-language",
+                          file=sys.stderr)
+            # Connector lands in no schema by default; pyexasol pre-OPENs the
+            # test schema on its own connection. Send a USE so unqualified
+            # table refs in test fixtures resolve here too. Best-effort —
+            # some connectors / proxy configs reject the rewritten OPEN SCHEMA
+            # response packet (e.g. pymysql via MaxScale + ExasolRouter); if
+            # USE fails, table-fixture tests will fail individually but
+            # schema-less tests (set_names, sqlglot_native, ...) still run.
+            try:
+                runner.execute("__use_schema__", f"USE {args.schema}")
+            except Exception as e:
+                print(f"[setup] {args.connector}: USE {args.schema} failed "
+                      f"({e}); table-fixture tests in this run will fail",
+                      file=sys.stderr)
+            # Re-probe sqlglot version — the runner's session may be on a
+            # different SLC than pyexasol's (different user, different
+            # server-side defaults via MaxScale, etc.), so report both.
+            try:
+                v = runner.execute("__glot_version__", "SELECT UTIL.GET_GLOT_VERSION()")
+                ver = v[0][0] if v and v[0] else "unknown"
+                print(f"[setup] sqlglot in {args.connector} runner SLC: {ver}")
+            except Exception as e:
+                print(f"[setup] sqlglot version probe via {args.connector} runner failed: {e}",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"[setup] connector init failed: {e}", file=sys.stderr)
+            return 3
+    else:
+        print(f"[setup] unsupported connector: {args.connector}", file=sys.stderr)
+        return 3
 
     compare_mode: str | None = None
     if args.compare_direct:
@@ -493,13 +647,7 @@ def main() -> int:
                 print(f"[run]  {label}")
                 print(f"       sql     : {sql_text.strip()}")
             try:
-                stmt = c.execute(sql_text)
-                # Non-SELECT statements (USE -> OPEN SCHEMA, DDL, DML) report
-                # result_type='rowCount' and raise on fetchall(); treat as [].
-                if getattr(stmt, "result_type", "resultSet") == "resultSet":
-                    rows = [list(r) for r in stmt.fetchall()]
-                else:
-                    rows = []
+                rows = runner.execute(label, sql_text)
                 expected = json.loads(expected_file.read_text())
             except Exception as e:
                 print(f"[FAIL] {label}: {e}", file=sys.stderr)
@@ -527,6 +675,8 @@ def main() -> int:
                     print(f"       mariadb : {mrows}{diff}")
                 except Exception as e:
                     print(f"       mariadb : ERROR: {e}")
+
+    runner.close()
 
     try:
         c.execute("ALTER SESSION SET sql_preprocessor_script=''")

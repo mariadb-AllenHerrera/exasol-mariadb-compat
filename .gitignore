@@ -5,3 +5,7 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Per-connector dependency installs — regenerable from package.json / requirements.txt
+tests/connectors/*/node_modules/
+tests/connectors/*/.venv/

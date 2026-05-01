@@ -113,6 +113,26 @@ python tests/run_tests.py --compare-direct --no-ssl-verify
 # to propagate before running each case on both engines:
 python tests/run_tests.py --compare-with-cdc --no-ssl-verify \
     --mariadb-user admin_user --mariadb-password 'aBc123%%'
+
+# Route test execution through MaxScale (port 3309 by default) using a
+# specific MariaDB connector. Setup still uses pyexasol direct; only test
+# SQL goes via the chosen runner. See tests/connectors/README.md for the
+# JSON Lines protocol each runner implements and the available choices
+# (currently nodejs, python_pymysql, python_mariadb):
+python tests/run_tests.py --connector nodejs --no-ssl-verify \
+    --maxscale-host 127.0.0.1 --maxscale-port 3309 \
+    --mariadb-user admin_user --mariadb-password 'aBc123%%' \
+    --udf set_names
+```
+
+Each connector runner is also standalone-runnable on stdin/stdout for
+ad-hoc probes (useful as a reproducer for upstream MaxScale / connector
+bugs):
+
+```sh
+echo '{"name":"q","sql":"SET NAMES utf8"}' | \
+    node tests/connectors/nodejs/runner.js \
+         --host 127.0.0.1 --port 3309 --user admin_user --password 'aBc123%%'
 ```
 
 The runner creates an ephemeral `MARIADB_COMPAT_TEST` schema, runs each
