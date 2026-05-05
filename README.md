@@ -144,6 +144,24 @@ runs on MariaDB; tables and rows arrive on Exasol via CDC, validated with
 a probe table at startup and per-group row-count polling. No persistent
 state.
 
+To eyeball the rewrite without a database in the loop, run the
+preprocessor adapter locally via `tools/standalone_adhoc_test.py` — it
+loads `preprocessor/maria_preprocessor.sql` (or `_debug.sql`) and runs
+its `adapter_call` against SQL on stdin or a file. Uses whichever sqlglot
+is on `PYTHONPATH`, so `pip install -e ../sqlglot` first if you're testing
+fork changes:
+
+```sh
+echo "SELECT FIELD(x,'a','b') FROM t" | python3 tools/standalone_adhoc_test.py
+python3 tools/standalone_adhoc_test.py path/to/query.sql
+python3 tools/standalone_adhoc_test.py --safe < query.sql   # non-DEBUG variant
+```
+
+Watch shell quoting: an outer `'…'` is terminated by inner `'`s, so
+`echo '… SELECT 1, ''val''…'` reaches Python with the inner quotes
+stripped and `val` parsed as an identifier. Prefer a heredoc or a file
+when the SQL contains string literals.
+
 ## Layout
 
 ```
@@ -156,6 +174,8 @@ exasol-mariadb-compat/
 │       └── json_object.sql
 ├── preprocessor/
 │   └── maria_preprocessor.sql  # UTIL.MARIA_PREPROCESSOR: AST-level MariaDB → Exasol rewriter
+├── tools/
+│   └── standalone_adhoc_test.py # runs the preprocessor adapter locally (no DB needed)
 ├── dist/
 │   └── mariadb-compat.sql      # built artifact, committed
 └── tests/
