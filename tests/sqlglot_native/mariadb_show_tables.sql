@@ -1,0 +1,1 @@
+SHOW TABLES FROM mariadb_show_tables_probe
